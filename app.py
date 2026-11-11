@@ -125,6 +125,10 @@ def handle_location(event):
 
     response = requests.get(url, params=params)
     data = response.json()
+    print("API STATUS:", response.status_code)
+print("GOOGLE STATUS:", data.get("status"))
+print("ERROR:", data.get("error_message"))
+print("RESULT:", len(data.get("results", [])))
 
     hospitals = data.get("results", [])
 
@@ -133,18 +137,13 @@ def handle_location(event):
     for hospital in hospitals:
         name = hospital.get("name", "")
 
-        if (
-            "โรงพยาบาล" in name
-            and "สัตว์" not in name
-            and "Animal" not in name
-            and "Veterinary" not in name
-            and "Pet" not in name
-            and "Vet" not in name
-            and "คลินิก" not in name
-            and "Clinic" not in name
-            and "รพ.สต." not in name
-            and "ส่งเสริมสุขภาพ" not in name
-       ):
+     if name and (
+    "Animal" not in name
+    and "Veterinary" not in name
+    and "Pet" not in name
+    and "Vet" not in name
+):
+    filtered_hospitals.append(hospital)
             filtered_hospitals.append(hospital)
 
     filtered_hospitals.sort(
