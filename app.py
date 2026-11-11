@@ -122,28 +122,27 @@ def handle_location(event):
         "key": GOOGLE_API_KEY
     }
 
-    response = requests.get(url, params=params)
-    data = response.json()
-    print("API STATUS:", response.status_code)
+response = requests.get(url, params=params)
+data = response.json()
+
+print("API STATUS:", response.status_code)
 print("GOOGLE STATUS:", data.get("status"))
 print("ERROR:", data.get("error_message"))
 print("RESULT:", len(data.get("results", [])))
 
-    hospitals = data.get("results", [])
+hospitals = data.get("results", [])
+filtered_hospitals = []
 
-    filtered_hospitals = []
+for hospital in hospitals:
+    name = hospital.get("name", "")
 
-    for hospital in hospitals:
-        name = hospital.get("name", "")
-
-     if name and (
-    "Animal" not in name
-    and "Veterinary" not in name
-    and "Pet" not in name
-    and "Vet" not in name
-):
-    filtered_hospitals.append(hospital)
-            filtered_hospitals.append(hospital)
+    if name and (
+        "Animal" not in name
+        and "Veterinary" not in name
+        and "Pet" not in name
+        and "Vet" not in name
+    ):
+        filtered_hospitals.append(hospital)
 
     filtered_hospitals.sort(
     key=lambda h: distance_km(
