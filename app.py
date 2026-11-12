@@ -24,12 +24,19 @@ app = Flask(__name__)
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
+if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
+    raise ValueError("กรุณาตรวจสอบ LINE_CHANNEL_ACCESS_TOKEN และ LINE_CHANNEL_SECRET")
+
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 
-# คำนวณระยะทาง
+# ==================================
+# คำนวณระยะทางระหว่าง 2 พิกัด
+# ==================================
+
 def distance_km(lat1, lon1, lat2, lon2):
+
     R = 6371
 
     dlat = radians(lat2 - lat1)
@@ -47,44 +54,200 @@ def distance_km(lat1, lon1, lat2, lon2):
     return R * c
 
 
+# ==================================
+# ค้นหาโรงพยาบาลด้วย OpenStreetMap
+# ==================================
+
+def find_nearby_hospitals(latitude, longitude):
+
+    urls = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter"
+    ]
+
+    query = f"""
+    [out:json][timeout:30];
+    (
+      nwr["amenity"="hospital"]
+        (around:10000,{latitude},{longitude});
+
+      nwr["healthcare"="hospital"]
+        (around:10000,{latitude},{longitude});
+    );
+    out center tags;
+    """
+
+    data = None
+
+    # ทดลองเชื่อมต่อเซิร์ฟเวอร์ทีละตัว
+    for url in urls:
+
+        try:
+
+            print("CONNECTING TO:", url)
+
+            response = requests.get(
+                url,
+                params={"data": query},
+                headers={
+                    "User-Agent": "EmergencyHelpBot/1.0"
+                },
+                timeout=40
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            print("OVERPASS SUCCESS")
+            print(
+                "FOUND ELEMENTS:",
+                len(data.get("elements", []))
+            )
+
+            break
+
+        except (requests.RequestException, ValueError) as e:
+
+            print("OVERPASS ERROR:", str(e))
+
+    if data is None:
+        raise Exception("ไม่สามารถเชื่อมต่อฐานข้อมูลโรงพยาบาลได้")
+
+    hospitals = []
+    seen = set()
+
+    for item in data.get("elements", []):
+
+        tags = item.get("tags", {})
+
+        # ตัดสถานพยาบาลสัตว์
+        if tags.get("healthcare") == "veterinary":
+            continue
+
+        if tags.get("amenity") == "veterinary":
+            continue
+
+        # ชื่อโรงพยาบาล
+        name = (
+            tags.get("name")
+            or tags.get("name:th")
+            or tags.get("official_name")
+            or tags.get("name:en")
+        )
+
+        if not name:
+            continue
+
+        # พิกัด
+        lat = item.get(
+            "lat",
+            item.get("center", {}).get("lat")
+        )
+
+        lng = item.get(
+            "lon",
+            item.get("center", {}).get("lon")
+        )
+
+        if lat is None or lng is None:
+            continue
+
+        # ป้องกันข้อมูลซ้ำ
+        osm_id = (
+            item.get("type"),
+            item.get("id")
+        )
+
+        if osm_id in seen:
+            continue
+
+        seen.add(osm_id)
+
+        # คำนวณระยะทาง
+        distance = distance_km(
+            latitude,
+            longitude,
+            lat,
+            lng
+        )
+
+        hospitals.append({
+            "name": name,
+            "lat": lat,
+            "lng": lng,
+            "distance": distance
+        })
+
+    # เรียงจากใกล้ที่สุด
+    hospitals.sort(
+        key=lambda h: h["distance"]
+    )
+
+    return hospitals[:5]
+
+
+# ==================================
+# หน้าแรก
+# ==================================
+
 @app.route("/")
 def home():
+
     return "Emergency Help Bot Running"
 
 
+# ==================================
+# LINE Webhook
+# ==================================
+
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers.get("X-Line-Signature", "")
+
+    signature = request.headers.get(
+        "X-Line-Signature", ""
+    )
+
     body = request.get_data(as_text=True)
 
     try:
+
         handler.handle(body, signature)
+
     except InvalidSignatureError:
+
         abort(400)
 
     return "OK"
 
 
+# ==================================
 # รับข้อความทั่วไป
+# ==================================
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
 
     user_text = event.message.text.strip()
 
-    print("ได้รับข้อความ:", user_text)
+    print("RECEIVED MESSAGE:", user_text)
 
     matched_keyword = None
 
     for keyword in KEYWORD_ORDER:
+
         if keyword in user_text:
+
             matched_keyword = keyword
             break
 
     if matched_keyword is None:
+
         line_bot_api.reply_message(
             event.reply_token,
             build_default_menu()
         )
+
         return
 
     if matched_keyword in CASES:
@@ -121,11 +284,16 @@ def handle_message(event):
 
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=DEFAULT_REPLY)
+            TextSendMessage(
+                text=DEFAULT_REPLY
+            )
         )
 
 
+# ==================================
 # รับตำแหน่งจาก LINE
+# ==================================
+
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location(event):
 
@@ -136,86 +304,13 @@ def handle_location(event):
     print("LATITUDE:", latitude)
     print("LONGITUDE:", longitude)
 
-    url = "https://overpass-api.de/api/interpreter"
-
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node["amenity"="hospital"](around:8000,{latitude},{longitude});
-      way["amenity"="hospital"](around:8000,{latitude},{longitude});
-      relation["amenity"="hospital"](around:8000,{latitude},{longitude});
-    );
-    out center tags;
-    """
-
     try:
 
-        response = requests.get(
-            url,
-            params={"data": query},
-            timeout=35
+        # ค้นหาโรงพยาบาล
+        hospitals = find_nearby_hospitals(
+            latitude,
+            longitude
         )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        print("OVERPASS STATUS:", response.status_code)
-        print(
-            "FOUND HOSPITALS:",
-            len(data.get("elements", []))
-        )
-
-        hospitals = []
-
-        for item in data.get("elements", []):
-
-            tags = item.get("tags", {})
-            name = tags.get("name")
-
-            if not name:
-                continue
-
-            lat = item.get(
-                "lat",
-                item.get("center", {}).get("lat")
-            )
-
-            lng = item.get(
-                "lon",
-                item.get("center", {}).get("lon")
-            )
-
-            if lat is None or lng is None:
-                continue
-
-            # ตัดสถานพยาบาลสัตว์ออก
-            if tags.get("healthcare") == "veterinary":
-                continue
-
-            if tags.get("amenity") == "veterinary":
-                continue
-
-            distance = distance_km(
-                latitude,
-                longitude,
-                lat,
-                lng
-            )
-
-            hospitals.append({
-                "name": name,
-                "lat": lat,
-                "lng": lng,
-                "distance": distance
-            })
-
-        # เรียงจากใกล้ไปไกล
-        hospitals.sort(
-            key=lambda h: h["distance"]
-        )
-
-        hospitals = hospitals[:5]
 
         reply_text = "🏥 โรงพยาบาลใกล้คุณ\n\n"
 
@@ -241,7 +336,8 @@ def handle_location(event):
         else:
 
             reply_text += (
-                "ไม่พบโรงพยาบาลในรัศมี 8 กิโลเมตร\n"
+                "ไม่พบข้อมูลโรงพยาบาลในรัศมี 10 กิโลเมตร\n"
+                "กรุณาลองส่งตำแหน่งอื่นอีกครั้ง\n\n"
             )
 
         reply_text += (
@@ -249,36 +345,33 @@ def handle_location(event):
             "โปรดโทร 1669"
         )
 
-    except requests.RequestException as e:
+    except Exception as e:
 
-        print("OVERPASS ERROR:", str(e))
-
-        reply_text = (
-            "ขออภัย ระบบค้นหาโรงพยาบาลขัดข้อง "
-            "กรุณาลองใหม่อีกครั้ง หรือโทร 1669 "
-            "หากเป็นเหตุฉุกเฉิน"
-        )
-
-    except ValueError as e:
-
-        print("JSON ERROR:", str(e))
+        print("HOSPITAL SEARCH ERROR:", str(e))
 
         reply_text = (
-            "ระบบอ่านข้อมูลโรงพยาบาลไม่ได้ "
-            "กรุณาลองใหม่อีกครั้ง"
+            "ขออภัย ระบบค้นหาโรงพยาบาลขัดข้อง\n"
+            "กรุณาลองใหม่อีกครั้ง\n\n"
+            "🚑 หากเป็นเหตุฉุกเฉิน โปรดโทร 1669"
         )
 
-    # ส่งข้อความกลับ LINE
+    # ส่งผลกลับ LINE
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=reply_text)
+        TextSendMessage(
+            text=reply_text
+        )
     )
 
+
+# ==================================
+# เริ่มต้น Flask
+# ==================================
 
 if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=5000,
-        debug=True
+        port=int(os.environ.get("PORT", 5000)),
+        debug=False
     )
