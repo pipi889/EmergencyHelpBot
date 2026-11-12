@@ -17,7 +17,6 @@ app = Flask(__name__)
 
 CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
@@ -106,84 +105,74 @@ def handle_message(event):
 
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location(event):
-    print("LOCATION RECEIVED")
-
     latitude = event.message.latitude
     longitude = event.message.longitude
 
-    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    url = "https://overpass-api.de/api/interpreter"
 
-    params = {
-        "location": f"{latitude},{longitude}",
-        "radius": 8000,
-        "type": "hospital",
-        "keyword": "โรงพยาบาล",
-        "key": GOOGLE_API_KEY
-    }
+    query = f"""
+    [out:json][timeout:25];
+    (
+      node["amenity"="hospital"](around:8000,{latitude},{longitude});
+      way["amenity"="hospital"](around:8000,{latitude},{longitude});
+      relation["amenity"="hospital"](around:8000,{latitude},{longitude});
+    );
+    out center tags;
+    """
 
-    response = requests.get(url, params=params)
-    data = response.json()
-    response = requests.get(url, params=params)
-    data = response.json()
+    try:
+        response = requests.get(url, params={"data": query}, timeout=30)
+        response.raise_for_status()
+        data = response.json()
 
-    print("API STATUS:", response.status_code)
-    print("GOOGLE STATUS:", data.get("status"))
-    print("ERROR:", data.get("error_message"))
-    print("RESULT:", len(data.get("results", [])))
+        hospitals = []
 
-    hospitals = data.get("results", [])
-    filtered_hospitals = []
+        for item in data.get("elements", []):
+            tags = item.get("tags", {})
+            name = tags.get("name")
 
-    for hospital in hospitals:
-        name = hospital.get("name", "")
+            if not name:
+                continue
 
-        if name and (
-            "Animal" not in name
-            and "Veterinary" not in name
-            and "Pet" not in name
-            and "Vet" not in name
-        ):
-            filtered_hospitals.append(hospital)
+            lat = item.get("lat", item.get("center", {}).get("lat"))
+            lng = item.get("lon", item.get("center", {}).get("lon"))
 
-    filtered_hospitals.sort(
-    key=lambda h: distance_km(
-        latitude,
-        longitude,
-        h["geometry"]["location"]["lat"],
-        h["geometry"]["location"]["lng"]
-    )
-)
+            if lat is None or lng is None:
+                continue
 
-    hospitals = filtered_hospitals[:3]
+            distance = distance_km(latitude, longitude, lat, lng)
 
-    reply_text = "🏥 โรงพยาบาลใกล้คุณ\n\n"
+            hospitals.append({
+                "name": name,
+                "lat": lat,
+                "lng": lng,
+                "distance": distance
+            })
 
-    if hospitals:
-        for i, hospital in enumerate(hospitals, start=1):
-            name = hospital.get("name", "ไม่ทราบชื่อ")
+        hospitals.sort(key=lambda h: h["distance"])
+        hospitals = hospitals[:3]
 
-            lat = hospital["geometry"]["location"]["lat"]
-            lng = hospital["geometry"]["location"]["lng"]
+        reply_text = "🏥 โรงพยาบาลใกล้คุณ\n\n"
 
+        if hospitals:
+            for i, hospital in enumerate(hospitals, start=1):
+                map_link = (
+                    f"https://maps.google.com/?q="
+                    f"{hospital['lat']},{hospital['lng']}"
+                )
 
-            distance = distance_km(
-                latitude,
-                longitude,
-                lat,
-                lng
-            )
+                reply_text += (
+                    f"{i}. {hospital['name']}\n"
+                    f"📍 ระยะประมาณ {hospital['distance']:.1f} กม.\n"
+                    f"{map_link}\n\n"
+                )
+        else:
+            reply_text += "ไม่พบโรงพยาบาลใกล้เคียง\n"
 
-            map_link = f"https://maps.google.com/?q={lat},{lng}"
+        reply_text += "🚑 หากเป็นเหตุฉุกเฉิน โปรดโทร 1669"
 
-            reply_text += (
-                f"{i}. {name}\n"
-                f"📍 ระยะโดยประมาณ {distance:.1f} กม.\n"
-                f"{map_link}\n\n"
-            )
-    else:
-        reply_text += "ไม่พบโรงพยาบาลใกล้เคียง\n"
-
-    reply_text += "\n🚑 หากเป็นเหตุฉุกเฉิน โปรดโทร 1669"
+    except requests.RequestException:
+        reply_text = "ขออภัย ระบบค้นหาโรงพยาบาลขัดข้อง กรุณาลองใหม่อีกครั้ง หรือโทร 1669 หากเป็นเหตุฉุกเฉิน"
 
     line_bot_api.reply_message(
         event.reply_token,
