@@ -1,472 +1,142 @@
+        results.append({
+            "name": name.strip(), "lat": lat, "lng": lon, "distance": d,
+            "type": "โรงพยาบาล" if is_hospital else "คลินิก",
+        })
 
-from flask import Flask, request, abort
-from dotenv import load_dotenv
-import os
-import requests
-import threading
-from math import radians, sin, cos, sqrt, atan2
-
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent,
-    TextMessage,
-    TextSendMessage,
-    LocationMessage
-)
-
-from content import CASES, SIMPLE_REPLIES, DEFAULT_REPLY, KEYWORD_ORDER
-from flex_messages import build_flex, build_default_menu, build_call_1669
-
-
-# ==================================
-# ตั้งค่าระบบ
-# ==================================
-
-load_dotenv()
-
-app = Flask(__name__)
-
-CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
-CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
-
-if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
-    raise ValueError(
-        "กรุณาตรวจสอบ LINE_CHANNEL_ACCESS_TOKEN "
-        "และ LINE_CHANNEL_SECRET"
-    )
-
-line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(CHANNEL_SECRET)
-
-OVERPASS_SERVERS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.private.coffee/api/interpreter"
-]
-
-HEADERS = {
-    "User-Agent": "EmergencyHelpBot/1.0"
-}
-
-
-# ==================================
-# คำนวณระยะทางระหว่าง 2 พิกัด
-# ==================================
-
-def distance_km(lat1, lon1, lat2, lon2):
-
-    earth_radius = 6371.0
-
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(radians(lat1))
-        * cos(radians(lat2))
-        * sin(dlon / 2) ** 2
-    )
-
-    c = 2 * atan2(
-        sqrt(a),
-        sqrt(1 - a)
-    )
-
-    return earth_radius * c
-
-
-# ==================================
-# สร้างคำค้นหาโรงพยาบาล
-# ==================================
-
-def build_hospital_query(latitude, longitude, radius):
-
-    return f"""
-    [out:json][timeout:40];
-    (
-      nwr["amenity"="hospital"]
-        (around:{radius},{latitude},{longitude});
-
-      nwr["healthcare"="hospital"]
-        (around:{radius},{latitude},{longitude});
-
-      nwr["amenity"="clinic"]
-        (around:{radius},{latitude},{longitude});
-
-      nwr["healthcare"="clinic"]
-        (around:{radius},{latitude},{longitude});
-    );
-    out center tags;
-    """
-
-
-# ==================================
-# ค้นหาโรงพยาบาลใกล้ฉัน
-# ==================================
-
-def find_nearby_hospitals(latitude, longitude):
-
-    hospitals = []
-    successful_search = False
-    last_error = None
-
-    # ค้นหา 10 กม. และขยายเป็น 25 กม.
-    for radius in [10000, 25000]:
-
-        query = build_hospital_query(
-            latitude,
-            longitude,
-            radius
+    results.sort(key=lambda h: h["distance"])
+    # หากเจอจุดและอาคารของสถานที่เดียวกันที่อยู่ใกล้กัน ให้เหลือหนึ่งรายการ
+    unique = []
+    for h in results:
+        duplicate = any(
+            h["name"].casefold() == prev["name"].casefold()
+            and distance_km(h["lat"], h["lng"], prev["lat"], prev["lng"]) < 0.15
+            for prev in unique
         )
-
-        print(
-            "SEARCH RADIUS:",
-            radius / 1000,
-            "KM"
-        )
-
-        # ทดลองเซิร์ฟเวอร์ทีละตัว
-        for url in OVERPASS_SERVERS:
-
-            try:
-
-                print("CONNECTING TO:", url)
-
-                response = requests.post(
-                    url,
-                    data={"data": query},
-                    headers=HEADERS,
-                    timeout=60
-                )
-
-                response.raise_for_status()
-
-                data = response.json()
-
-                if data.get("remark"):
-                    raise ValueError(data["remark"])
-
-                elements = data.get("elements", [])
-
-                print("OVERPASS SUCCESS")
-                print("FOUND ELEMENTS:", len(elements))
-
-                successful_search = True
-
-                for item in elements:
-
-                    tags = item.get("tags", {})
-
-                    # ไม่แสดงสถานพยาบาลสัตว์
-                    if tags.get("healthcare") == "veterinary":
-                        continue
-
-                    if tags.get("amenity") == "veterinary":
-                        continue
-
-                    # ดึงพิกัด
-                    center = item.get("center", {})
-
-                    lat = item.get(
-                        "lat",
-                        center.get("lat")
-                    )
-
-                    lng = item.get(
-                        "lon",
-                        center.get("lon")
-                    )
-
-                    if lat is None or lng is None:
-                        continue
-
-                    # ดึงชื่อสถานที่
-                    name = (
-                        tags.get("name")
-                        or tags.get("name:th")
-                        or tags.get("official_name")
-                        or tags.get("name:en")
-                        or "สถานพยาบาลไม่มีชื่อ"
-                    )
-
-                    # คำนวณระยะทาง
-                    distance = distance_km(
-                        latitude,
-                        longitude,
-                        lat,
-                        lng
-                    )
-
-                    hospitals.append({
-                        "name": name,
-                        "lat": lat,
-                        "lng": lng,
-                        "distance": distance
-                    })
-
-                # เชื่อมต่อสำเร็จแล้ว ไม่ต้องลองเซิร์ฟเวอร์อื่น
-                break
-
-            except Exception as error:
-
-                last_error = error
-
-                print(
-                    "OVERPASS ERROR:",
-                    url,
-                    repr(error)
-                )
-
-        # ถ้าพบสถานพยาบาลแล้ว ไม่ต้องขยายรัศมี
-        if hospitals:
+        if not duplicate:
+            unique.append(h)
+        if len(unique) == MAX_RESULTS:
             break
+    return unique
 
-    # ถ้าเชื่อมต่อทุกเซิร์ฟเวอร์ไม่สำเร็จ
-    if not successful_search:
 
-        raise Exception(
-            f"ไม่สามารถเชื่อมต่อ OpenStreetMap ได้: {last_error}"
+def google_maps_nearby_url(lat, lon):
+    # Google Maps ค้นหาตามตำแหน่งที่ผู้ใช้ส่งมา ไม่ใช่ตำแหน่งของเซิร์ฟเวอร์
+    query = quote("โรงพยาบาล", safe="")
+    return f"https://www.google.com/maps/search/{query}/@{lat},{lon},13z"
+
+
+def google_maps_pin_url(lat, lon):
+    return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+
+def build_hospital_reply(hospitals, latitude, longitude):
+    if not hospitals:
+        return (
+            "🏥 ไม่พบข้อมูลสถานพยาบาลในแผนที่ OpenStreetMap ภายใน 25 กม.\n"
+            "ข้อมูลอาจไม่ครบถ้วน ลองดู Google Maps:\n"
+            f"{google_maps_nearby_url(latitude, longitude)}\n\n"
+            "🚑 ฉุกเฉินในไทยโทร 1669"
         )
-
-    # ลบข้อมูลซ้ำจากพิกัด
-    unique_hospitals = {}
-
-    for hospital in hospitals:
-
-        key = (
-            round(hospital["lat"], 6),
-            round(hospital["lng"], 6)
+    lines = ["🏥 สถานพยาบาลใกล้ตำแหน่งที่ส่งมา\n"]
+    for i, h in enumerate(hospitals, 1):
+        lines.append(
+            f"{i}. {h['name']} ({h['type']})\n"
+            f"📍 เส้นตรงประมาณ {h['distance']:.1f} กม.\n"
+            f"🗺️ {google_maps_pin_url(h['lat'], h['lng'])}\n"
         )
-
-        if key not in unique_hospitals:
-            unique_hospitals[key] = hospital
-
-    hospitals = list(unique_hospitals.values())
-
-    # เรียงจากใกล้ที่สุด
-    hospitals.sort(
-        key=lambda h: h["distance"]
-    )
-
-    print(
-        "FINAL HOSPITAL COUNT:",
-        len(hospitals)
-    )
-
-    return hospitals[:5]
+    lines.append("ตรวจสอบเวลาเปิดบริการและเส้นทางก่อนเดินทาง\n🚑 ฉุกเฉินในไทยโทร 1669")
+    return "\n".join(lines)
 
 
-# ==================================
-# หน้าแรก
-# ==================================
+def search_and_send_hospitals(target_id, latitude, longitude):
+    print("START SEARCH", flush=True)
+    try:
+        hospitals = find_nearby_hospitals(latitude, longitude)
+        message = build_hospital_reply(hospitals, latitude, longitude)
+    except Exception as exc:
+        print("SEARCH ERROR:", repr(exc), flush=True)
+        # สำคัญ: หาก Overpass ใช้ไม่ได้ ต้องไม่ปล่อยให้ผู้ใช้รอโดยไม่มีทางเลือก
+        message = (
+            "⚠️ ระบบรายชื่อโรงพยาบาลชั่วคราวไม่พร้อมใช้งาน\n"
+            "เปิด Google Maps เพื่อค้นหาโรงพยาบาลใกล้ตำแหน่งที่ส่งมา:\n"
+            f"{google_maps_nearby_url(latitude, longitude)}\n\n"
+            "🚑 หากฉุกเฉินในไทย โทร 1669"
+        )
+    try:
+        line_bot_api.push_message(target_id, TextSendMessage(text=message))
+        print("PUSH SUCCESS", flush=True)
+    except Exception as exc:
+        print("PUSH ERROR:", repr(exc), flush=True)
+
 
 @app.route("/")
 def home():
+    return "Emergency Help Bot Running", 200
 
-    return "Emergency Help Bot Running"
-
-
-# ==================================
-# LINE Webhook
-# ==================================
 
 @app.route("/callback", methods=["POST"])
 def callback():
-
-    signature = request.headers.get(
-        "X-Line-Signature",
-        ""
-    )
-
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-
     try:
-
         handler.handle(body, signature)
-
     except InvalidSignatureError:
-
         abort(400)
+    return "OK", 200
 
-    return "OK"
-
-
-# ==================================
-# รับข้อความทั่วไป
-# ==================================
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-
     user_text = event.message.text.strip()
+    print("RECEIVED MESSAGE:", user_text, flush=True)
 
-    print("RECEIVED MESSAGE:", user_text)
-
-    matched_keyword = None
-
-    for keyword in KEYWORD_ORDER:
-
-        if keyword in user_text:
-
-            matched_keyword = keyword
-            break
-
-    if matched_keyword is None:
-
+    if any(term in user_text for term in (
+        "ค้นหาโรงพยาบาล", "โรงพยาบาลใกล้ฉัน", "โรงพยาบาลใกล้เคียง", "หาโรงพยาบาล"
+    )):
         line_bot_api.reply_message(
             event.reply_token,
-            build_default_menu()
+            TextSendMessage(text="🏥 กรุณากด + ใน LINE เลือก 'ตำแหน่งที่ตั้ง' แล้วส่งพิกัดให้บอท\n🚑 หากฉุกเฉินในไทย โทร 1669")
         )
-
         return
 
-    if matched_keyword in CASES:
-
-        flex_message = build_flex(
-            matched_keyword,
-            CASES[matched_keyword]
-        )
-
-        line_bot_api.reply_message(
-            event.reply_token,
-            flex_message
-        )
-
+    matched_keyword = next((k for k in KEYWORD_ORDER if k in user_text), None)
+    if matched_keyword is None:
+        line_bot_api.reply_message(event.reply_token, build_default_menu())
+    elif matched_keyword in CASES:
+        line_bot_api.reply_message(event.reply_token, build_flex(matched_keyword, CASES[matched_keyword]))
     elif matched_keyword in SIMPLE_REPLIES:
-
         if matched_keyword == "โทร 1669":
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                build_call_1669()
-            )
-
+            line_bot_api.reply_message(event.reply_token, build_call_1669())
         else:
-
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(
-                    text=SIMPLE_REPLIES[matched_keyword]
-                )
-            )
-
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=SIMPLE_REPLIES[matched_keyword]))
     else:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=DEFAULT_REPLY))
 
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(
-                text=DEFAULT_REPLY
-            )
-        )
-
-
-# ==================================
-# ค้นหาโรงพยาบาลในเบื้องหลัง
-# ==================================
-
-def search_and_send_hospitals(target_id, latitude, longitude):
-
-    try:
-        print("START SEARCH", flush=True)
-
-        hospitals = find_nearby_hospitals(
-            latitude, longitude
-        )
-
-        reply_text = "🏥 สถานพยาบาลใกล้คุณ\n\n"
-
-        if hospitals:
-            for index, hospital in enumerate(hospitals, 1):
-
-                map_link = (
-                    "https://www.google.com/maps/search/"
-                    f"?api=1&query={hospital['lat']},{hospital['lng']}"
-                )
-
-                reply_text += (
-                    f"{index}. {hospital['name']}\n"
-                    f"📍 ระยะประมาณ {hospital['distance']:.1f} กม.\n"
-                    f"🗺️ {map_link}\n\n"
-                )
-        else:
-            reply_text += (
-                "ไม่พบข้อมูลสถานพยาบาลในรัศมี 25 กม.\n\n"
-            )
-
-        reply_text += "🚑 หากฉุกเฉิน โทร 1669"
-
-    except Exception as error:
-        print("SEARCH ERROR:", repr(error), flush=True)
-
-        reply_text = (
-            "❌ ระบบค้นหาสถานพยาบาลขัดข้อง\n"
-            "กรุณาลองใหม่อีกครั้ง\n"
-            "🚑 หากฉุกเฉิน โทร 1669"
-        )
-
-    try:
-        line_bot_api.push_message(
-            target_id,
-            TextSendMessage(text=reply_text)
-        )
-
-        print("PUSH SUCCESS", flush=True)
-
-    except Exception as error:
-        print("PUSH ERROR:", repr(error), flush=True)
-
-
-# ==================================
-# รับตำแหน่งจาก LINE
-# ==================================
 
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location(event):
-
     latitude = event.message.latitude
     longitude = event.message.longitude
-
     print("LOCATION RECEIVED", flush=True)
-
-    # เลือกปลายทางสำหรับ Push Message
     source = event.source
-
-    target_id = (
-        getattr(source, "group_id", None)
-        or getattr(source, "room_id", None)
-        or getattr(source, "user_id", None)
-    )
-
-    # ตอบทันทีด้วย Reply Token
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(
-            text="📍 ได้รับตำแหน่งแล้ว กำลังค้นหาโรงพยาบาลใกล้คุณ..."
-        )
-    )
+    target_id = (getattr(source, "group_id", None) or getattr(source, "room_id", None)
+                 or getattr(source, "user_id", None))
 
     if not target_id:
-        print("NO PUSH TARGET", flush=True)
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="ไม่พบห้องแชตสำหรับส่งผลค้นหา กรุณาลองใหม่"))
         return
 
-    # เริ่มค้นหาแยกจากการตอบรับ
+    # ตอบรับก่อนเพื่อไม่ใช้ reply token หลังการเรียก Overpass ที่อาจล่าช้า
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text="📍 ได้รับตำแหน่งแล้ว กำลังค้นหาสถานพยาบาลใกล้คุณ...")
+    )
     threading.Thread(
         target=search_and_send_hospitals,
         args=(target_id, latitude, longitude),
-        daemon=True
+        daemon=True,
     ).start()
 
 
-
-# ==================================
-# เริ่มต้น Flask
-# ==================================
-
 if __name__ == "__main__":
-
-    app.run(
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        debug=False
-    )
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
