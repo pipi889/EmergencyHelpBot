@@ -3,6 +3,7 @@ from flask import Flask, request, abort
 from dotenv import load_dotenv
 import os
 import requests
+import threading
 from math import radians, sin, cos, sqrt, atan2
 
 from linebot import LineBotApi, WebhookHandler
@@ -361,6 +362,62 @@ def handle_message(event):
 
 
 # ==================================
+# ค้นหาโรงพยาบาลในเบื้องหลัง
+# ==================================
+
+def search_and_send_hospitals(target_id, latitude, longitude):
+
+    try:
+        print("START SEARCH", flush=True)
+
+        hospitals = find_nearby_hospitals(
+            latitude, longitude
+        )
+
+        reply_text = "🏥 สถานพยาบาลใกล้คุณ\n\n"
+
+        if hospitals:
+            for index, hospital in enumerate(hospitals, 1):
+
+                map_link = (
+                    "https://www.google.com/maps/search/"
+                    f"?api=1&query={hospital['lat']},{hospital['lng']}"
+                )
+
+                reply_text += (
+                    f"{index}. {hospital['name']}\n"
+                    f"📍 ระยะประมาณ {hospital['distance']:.1f} กม.\n"
+                    f"🗺️ {map_link}\n\n"
+                )
+        else:
+            reply_text += (
+                "ไม่พบข้อมูลสถานพยาบาลในรัศมี 25 กม.\n\n"
+            )
+
+        reply_text += "🚑 หากฉุกเฉิน โทร 1669"
+
+    except Exception as error:
+        print("SEARCH ERROR:", repr(error), flush=True)
+
+        reply_text = (
+            "❌ ระบบค้นหาสถานพยาบาลขัดข้อง\n"
+            "กรุณาลองใหม่อีกครั้ง\n"
+            "🚑 หากฉุกเฉิน โทร 1669"
+        )
+
+    try:
+        line_bot_api.push_message(
+            target_id,
+            TextSendMessage(text=reply_text)
+        )
+
+        print("PUSH SUCCESS", flush=True)
+
+    except Exception as error:
+        print("PUSH ERROR:", repr(error), flush=True)
+
+
+# ==================================
 # รับตำแหน่งจาก LINE
 # ==================================
 
@@ -370,72 +427,36 @@ def handle_location(event):
     latitude = event.message.latitude
     longitude = event.message.longitude
 
-    print("========== LOCATION RECEIVED ==========")
-    print("LATITUDE:", latitude)
-    print("LONGITUDE:", longitude)
+    print("LOCATION RECEIVED", flush=True)
 
-    try:
+    # เลือกปลายทางสำหรับ Push Message
+    source = event.source
 
-        # ค้นหาสถานพยาบาลใกล้พิกัด
-        hospitals = find_nearby_hospitals(
-            latitude,
-            longitude
-        )
+    target_id = (
+        getattr(source, "group_id", None)
+        or getattr(source, "room_id", None)
+        or getattr(source, "user_id", None)
+    )
 
-        reply_text = "🏥 สถานพยาบาลใกล้คุณ\n\n"
-
-        if hospitals:
-
-            for index, hospital in enumerate(
-                hospitals,
-                start=1
-            ):
-
-                map_link = (
-                    "https://www.google.com/maps/search/?api=1&query="
-                    f"{hospital['lat']},{hospital['lng']}"
-                )
-
-                reply_text += (
-                    f"{index}. {hospital['name']}\n"
-                    f"📍 ระยะประมาณ "
-                    f"{hospital['distance']:.1f} กม.\n"
-                    f"🗺️ {map_link}\n\n"
-                )
-
-        else:
-
-            reply_text += (
-                "ไม่พบข้อมูลโรงพยาบาลหรือคลินิก "
-                "ในรัศมี 25 กิโลเมตร\n"
-                "กรุณาลองส่งตำแหน่งอีกครั้ง\n\n"
-            )
-
-        reply_text += (
-            "🚑 หากเป็นเหตุฉุกเฉิน "
-            "โปรดโทร 1669"
-        )
-
-    except Exception as error:
-
-        print(
-            "HOSPITAL SEARCH ERROR:",
-            repr(error)
-        )
-
-        reply_text = (
-            "ขออภัย ระบบค้นหาสถานพยาบาลขัดข้อง\n"
-            "กรุณาลองใหม่อีกครั้ง\n\n"
-            "🚑 หากเป็นเหตุฉุกเฉิน โปรดโทร 1669"
-        )
-
-    # ส่งข้อความกลับ LINE
+    # ตอบทันทีด้วย Reply Token
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(
-            text=reply_text
+            text="📍 ได้รับตำแหน่งแล้ว กำลังค้นหาโรงพยาบาลใกล้คุณ..."
         )
     )
+
+    if not target_id:
+        print("NO PUSH TARGET", flush=True)
+        return
+
+    # เริ่มค้นหาแยกจากการตอบรับ
+    threading.Thread(
+        target=search_and_send_hospitals,
+        args=(target_id, latitude, longitude),
+        daemon=True
+    ).start()
+
 
 
 # ==================================
