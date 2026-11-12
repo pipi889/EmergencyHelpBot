@@ -123,9 +123,12 @@ def handle_location(event):
     try:
         response = requests.get(url, params={"data": query}, timeout=30)
         response.raise_for_status()
-        data = response.json()
+  data = response.json()
 
-        hospitals = []
+print("OVERPASS STATUS:", response.status_code)
+print("FOUND HOSPITALS:", len(data.get("elements", [])))
+
+hospitals = []
 
         for item in data.get("elements", []):
             tags = item.get("tags", {})
