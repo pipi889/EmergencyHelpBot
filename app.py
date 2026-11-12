@@ -136,8 +136,8 @@ def find_nearby_hospitals(latitude, longitude):
             or tags.get("name:en")
         )
 
-        if not name:
-            continue
+       if not name:
+            name = "สถานพยาบาล (ไม่มีชื่อในฐานข้อมูล)"
 
         # พิกัด
         lat = item.get(
