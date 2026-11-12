@@ -104,7 +104,6 @@ def handle_message(event):
             TextSendMessage(text=DEFAULT_REPLY)
         )
 
-
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location(event):
     print("LOCATION RECEIVED")
@@ -122,6 +121,8 @@ def handle_location(event):
         "key": GOOGLE_API_KEY
     }
 
+    response = requests.get(url, params=params)
+    data = response.json()
     response = requests.get(url, params=params)
     data = response.json()
 
