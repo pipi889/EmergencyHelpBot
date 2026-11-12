@@ -1,3 +1,4 @@
+
 from flask import Flask, request, abort
 from dotenv import load_dotenv
 import os
@@ -6,7 +7,12 @@ from math import radians, sin, cos, sqrt, atan2
 
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, LocationMessage
+from linebot.models import (
+    MessageEvent,
+    TextMessage,
+    TextSendMessage,
+    LocationMessage
+)
 
 from content import CASES, SIMPLE_REPLIES, DEFAULT_REPLY, KEYWORD_ORDER
 from flex_messages import build_flex, build_default_menu, build_call_1669
@@ -21,6 +27,8 @@ CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
+
+# คำนวณระยะทาง
 def distance_km(lat1, lon1, lat2, lon2):
     R = 6371
 
@@ -38,6 +46,7 @@ def distance_km(lat1, lon1, lat2, lon2):
 
     return R * c
 
+
 @app.route("/")
 def home():
     return "Emergency Help Bot Running"
@@ -45,11 +54,8 @@ def home():
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    signature = request.headers["X-Line-Signature"]
+    signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
-
-    print("BODY =", body)
-    print("SIGNATURE =", signature)
 
     try:
         handler.handle(body, signature)
@@ -59,13 +65,16 @@ def callback():
     return "OK"
 
 
+# รับข้อความทั่วไป
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+
     user_text = event.message.text.strip()
 
     print("ได้รับข้อความ:", user_text)
 
     matched_keyword = None
+
     for keyword in KEYWORD_ORDER:
         if keyword in user_text:
             matched_keyword = keyword
@@ -79,34 +88,53 @@ def handle_message(event):
         return
 
     if matched_keyword in CASES:
-        # เคสที่มีข้อมูล structured -> ส่งเป็น Flex Message
-        flex_message = build_flex(matched_keyword, CASES[matched_keyword])
+
+        flex_message = build_flex(
+            matched_keyword,
+            CASES[matched_keyword]
+        )
+
         line_bot_api.reply_message(
             event.reply_token,
             flex_message
         )
+
     elif matched_keyword in SIMPLE_REPLIES:
+
         if matched_keyword == "โทร 1669":
+
             line_bot_api.reply_message(
                 event.reply_token,
                 build_call_1669()
             )
+
         else:
+
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text=SIMPLE_REPLIES[matched_keyword])
+                TextSendMessage(
+                    text=SIMPLE_REPLIES[matched_keyword]
+                )
             )
+
     else:
-        # เผื่อไว้ ถ้า keyword อยู่ใน KEYWORD_ORDER แต่ไม่มีข้อมูลจริง
+
         line_bot_api.reply_message(
             event.reply_token,
             TextSendMessage(text=DEFAULT_REPLY)
         )
 
+
+# รับตำแหน่งจาก LINE
 @handler.add(MessageEvent, message=LocationMessage)
 def handle_location(event):
+
     latitude = event.message.latitude
     longitude = event.message.longitude
+
+    print("LOCATION RECEIVED")
+    print("LATITUDE:", latitude)
+    print("LONGITUDE:", longitude)
 
     url = "https://overpass-api.de/api/interpreter"
 
@@ -121,29 +149,59 @@ def handle_location(event):
     """
 
     try:
-        response = requests.get(url, params={"data": query}, timeout=30)
+
+        response = requests.get(
+            url,
+            params={"data": query},
+            timeout=35
+        )
+
         response.raise_for_status()
-  data = response.json()
 
-print("OVERPASS STATUS:", response.status_code)
-print("FOUND HOSPITALS:", len(data.get("elements", [])))
+        data = response.json()
 
-hospitals = []
+        print("OVERPASS STATUS:", response.status_code)
+        print(
+            "FOUND HOSPITALS:",
+            len(data.get("elements", []))
+        )
+
+        hospitals = []
 
         for item in data.get("elements", []):
+
             tags = item.get("tags", {})
             name = tags.get("name")
 
             if not name:
                 continue
 
-            lat = item.get("lat", item.get("center", {}).get("lat"))
-            lng = item.get("lon", item.get("center", {}).get("lon"))
+            lat = item.get(
+                "lat",
+                item.get("center", {}).get("lat")
+            )
+
+            lng = item.get(
+                "lon",
+                item.get("center", {}).get("lon")
+            )
 
             if lat is None or lng is None:
                 continue
 
-            distance = distance_km(latitude, longitude, lat, lng)
+            # ตัดสถานพยาบาลสัตว์ออก
+            if tags.get("healthcare") == "veterinary":
+                continue
+
+            if tags.get("amenity") == "veterinary":
+                continue
+
+            distance = distance_km(
+                latitude,
+                longitude,
+                lat,
+                lng
+            )
 
             hospitals.append({
                 "name": name,
@@ -152,35 +210,75 @@ hospitals = []
                 "distance": distance
             })
 
-        hospitals.sort(key=lambda h: h["distance"])
-        hospitals = hospitals[:3]
+        # เรียงจากใกล้ไปไกล
+        hospitals.sort(
+            key=lambda h: h["distance"]
+        )
+
+        hospitals = hospitals[:5]
 
         reply_text = "🏥 โรงพยาบาลใกล้คุณ\n\n"
 
         if hospitals:
-            for i, hospital in enumerate(hospitals, start=1):
+
+            for i, hospital in enumerate(
+                hospitals,
+                start=1
+            ):
+
                 map_link = (
-                    f"https://maps.google.com/?q="
+                    "https://www.google.com/maps/search/?api=1&query="
                     f"{hospital['lat']},{hospital['lng']}"
                 )
 
                 reply_text += (
                     f"{i}. {hospital['name']}\n"
-                    f"📍 ระยะประมาณ {hospital['distance']:.1f} กม.\n"
-                    f"{map_link}\n\n"
+                    f"📍 ระยะประมาณ "
+                    f"{hospital['distance']:.1f} กม.\n"
+                    f"🗺️ {map_link}\n\n"
                 )
+
         else:
-            reply_text += "ไม่พบโรงพยาบาลใกล้เคียง\n"
 
-        reply_text += "🚑 หากเป็นเหตุฉุกเฉิน โปรดโทร 1669"
+            reply_text += (
+                "ไม่พบโรงพยาบาลในรัศมี 8 กิโลเมตร\n"
+            )
 
-    except requests.RequestException:
-        reply_text = "ขออภัย ระบบค้นหาโรงพยาบาลขัดข้อง กรุณาลองใหม่อีกครั้ง หรือโทร 1669 หากเป็นเหตุฉุกเฉิน"
+        reply_text += (
+            "🚑 หากเป็นเหตุฉุกเฉิน "
+            "โปรดโทร 1669"
+        )
 
+    except requests.RequestException as e:
+
+        print("OVERPASS ERROR:", str(e))
+
+        reply_text = (
+            "ขออภัย ระบบค้นหาโรงพยาบาลขัดข้อง "
+            "กรุณาลองใหม่อีกครั้ง หรือโทร 1669 "
+            "หากเป็นเหตุฉุกเฉิน"
+        )
+
+    except ValueError as e:
+
+        print("JSON ERROR:", str(e))
+
+        reply_text = (
+            "ระบบอ่านข้อมูลโรงพยาบาลไม่ได้ "
+            "กรุณาลองใหม่อีกครั้ง"
+        )
+
+    # ส่งข้อความกลับ LINE
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )
