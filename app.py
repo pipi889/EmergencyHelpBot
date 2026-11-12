@@ -1,4 +1,5 @@
-        results.append({
+from flask import Flask, request, abort
+results.append({
             "name": name.strip(), "lat": lat, "lng": lon, "distance": d,
             "type": "โรงพยาบาล" if is_hospital else "คลินิก",
         })
